@@ -21,6 +21,7 @@ import { Niebla } from './mundo/niebla.js';
 import { ciclo } from './mundo/ciclo.js';
 import { Tutorial } from './ui/tutorial.js';
 import { Hud } from './ui/hud.js';
+import { BaseEnemiga } from './unidades/baseenemiga.js';
 import './audio/musica.js';                                   // música de fondo (se arranca sola)
 
 async function main() {
@@ -38,13 +39,17 @@ async function main() {
   let niebla, map, view, seed, ship, rover, builder, economia, enemigos, mechas, tanques, obstaculos = [], resAt = new Map(), hover = { x: -1, y: -1 };
   const minimap = new Minimap((u, v) => camera.centerOn(u * map.w * TILE, v * map.h * TILE));
 
-  let aterrizado = false;                                 // ya se hizo lo del aterrizaje (sonido, sacudida, tutorial)
-  const tutorial = new Tutorial();
+let aterrizado = false;                                 // ya se hizo lo del aterrizaje (sonido, sacudida, tutorial)
+let baseEnemiga = null;                                 // base enemiga (fase 2)
+let baseEnemigaCreada = false;                          // flag para crearla una sola vez
+const tutorial = new Tutorial();
   const info = new InfoPanel(() => builder, () => economia, () => tanques);
   const menu = new BuildMenu(id => builder && builder.seleccionar(id));   // el menú se crea una sola vez
 
   function load(s) {
     aterrizado = false;
+    baseEnemigaCreada = false;
+    if (baseEnemiga) { baseEnemiga.destroy(); baseEnemiga = null; }
     seed = s; location.hash = 'seed=' + s;
     ciclo.reset();
     map = generateMap({ seed: s, w: MAP_W, h: MAP_H });
@@ -115,6 +120,27 @@ async function main() {
       world.addChild(tanques.container);                  // los tanques quedan por encima de los edificios
       world.addChild(niebla.sprite);                      // la niebla va encima de los edificios (así se iluminan al terminarse)                  // el fantasma siempre encima                    // se añade después de la nave: queda encima
       camera.follow(rover);                               // PASO 3: la cámara empieza a seguirlo
+
+      // FASE 2: Crear base enemiga en la esquina opuesta
+      if (!baseEnemigaCreada) {
+        baseEnemigaCreada = true;
+        baseEnemiga = new BaseEnemiga({
+          map,
+          builder,
+          economia,
+          enemigos,
+          tanques,
+          mechas,
+          camera,
+          canvas: app.canvas,
+          spawnJugador: { x: map.spawn.x, y: map.spawn.y }
+        });
+        world.addChild(baseEnemiga.container);
+
+        // Pasar referencia de la base enemiga a tanques y mechas para que puedan atacar el núcleo
+        tanques.baseEnemiga = baseEnemiga;
+        mechas.baseEnemiga = baseEnemiga;
+      }
     }
     if (rover) rover.update(t.deltaMS);
     builder.update(t.deltaMS);
@@ -122,6 +148,17 @@ async function main() {
     enemigos.update(t.deltaMS);
     mechas.update(t.deltaMS);
     tanques.update(t.deltaMS);
+    if (baseEnemiga) baseEnemiga.update(t.deltaMS);
+
+    // Victoria: destruir el núcleo de la base enemiga
+    if (baseEnemiga && baseEnemiga.destruida) {
+      if (!baseEnemiga.victoriaMostrada) {
+        baseEnemiga.victoriaMostrada = true;
+        sfx.play('mejora');
+        menu.setMensaje('¡VICTORIA! Has destruido el núcleo enemigo y recuperado el núcleo central. Cambio y corto.');
+      }
+    }
+
     ciclo.update(t.deltaMS, app.screen.width, app.screen.height);
     economia.update(t.deltaMS);
     if (economia.ruedas === 'lista' && rover && rover.state === 'libre') { economia.ruedas = 'hecha'; rover.instalarRuedas(); }   // las ruedas del laboratorio se acoplan al rover

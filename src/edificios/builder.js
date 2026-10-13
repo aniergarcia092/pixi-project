@@ -132,7 +132,7 @@ export class Builder {
     return { x0: Math.round(p.x / TILE - this.def.w / 2), y0: Math.round(p.y / TILE - this.def.h / 2) };
   }
 
-  colocar() {
+colocar() {
     if (this.sx < 0) return;
     const { x0, y0 } = this.esquina();
     if (this.motivoInvalido(this.def, x0, y0)) { sfx.play('error'); return; }
@@ -141,7 +141,7 @@ export class Builder {
     dib.position.set(x0 * TILE, y0 * TILE);
     this.container.addChildAt(dib, 1);                // encima de los cables, debajo del fantasma
     this.economia.pagar(this.def);
-    const e = { def: this.def, x: x0, y: y0, dib, res: this.resAt.get(y0 * this.map.w + x0), construccion: this.def.tiempo || 0 };
+    const e = { def: this.def, x: x0, y: y0, dib, res: this.resAt.get(y0 * this.map.w + x0), construccion: this.def.tiempo || 0, owner: 'player' };
     dib.alpha = .45;                                  // semitransparente mientras se construye
     this.edificios.push(e);                           // entra en la economía al terminar (ver avanzarObras)
     for (let ty = y0; ty < y0 + this.def.h; ty++) for (let tx = x0; tx < x0 + this.def.w; tx++) this.ocup.add(ty * this.map.w + tx);

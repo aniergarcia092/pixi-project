@@ -68,8 +68,9 @@ const VEL = 70;                    // píxeles por segundo
 const ALCANCE = 70, DANO = 30;     // alcance del disparo y daño por segundo
 
 export class Mechas {
-  constructor({ builder, economia, enemigos }) {
+  constructor({ builder, economia, enemigos, baseEnemiga }) {
     this.builder = builder; this.economia = economia; this.enemigos = enemigos;
+    this.baseEnemiga = baseEnemiga;
     this.lista = [];               // { x, y, dest, owner }
     this.container = new Container();
     this.g = new Graphics();
@@ -100,6 +101,15 @@ export class Mechas {
         if (Math.hypot(en.x - fx, en.y - fy) > RADIO_DEFENSA) continue;
         const d = Math.hypot(en.x - m.x, en.y - m.y); if (d < md) { md = d; objetivo = en; }
       }
+      // También considerar el núcleo de la base enemiga
+      if (this.baseEnemiga && this.baseEnemiga.nucleo && this.baseEnemiga.nucleo.vida > 0) {
+        const core = this.baseEnemiga.nucleo;
+        const d = Math.hypot(core.x * TILE - m.x, core.y * TILE - m.y);
+        if (d <= RADIO_DEFENSA && d < md) {
+          md = d;
+          objetivo = { x: core.x * TILE, y: core.y * TILE, vida: core.vida, esNucleo: true };
+        }
+      }
       let tx, ty;
       if (objetivo) { tx = objetivo.x; ty = objetivo.y; }
       else {
@@ -112,7 +122,12 @@ export class Mechas {
       const d = Math.hypot(tx - m.x, ty - m.y);
       m.ang = d > 1 ? Math.atan2(ty - m.y, tx - m.x) : (m.ang || 0);
       if (objetivo && d <= ALCANCE) {
-        objetivo.vida -= DANO * dt; sfx.play('laser2');
+        if (objetivo.esNucleo && this.baseEnemiga && this.baseEnemiga.nucleo) {
+          this.baseEnemiga.recibirDanoNucleo(DANO * dt);
+        } else {
+          objetivo.vida -= DANO * dt;
+        }
+        sfx.play('laser2');
         g.moveTo(m.x, m.y).lineTo(objetivo.x, objetivo.y).stroke({ width: 3, color: 0x5fd0ff, alpha: .9 });
       } else if (d > 4) { m.x += (tx - m.x) / d * VEL * dt; m.y += (ty - m.y) / d * VEL * dt; m.fase += dt * 10; }
     }
@@ -278,8 +293,9 @@ function buscarRuta(tq, x0, y0, x1, y1, suave = true) {
 }
 
 export class Tanques {
-  constructor({ map, builder, economia, enemigos, camera, canvas }) {
+  constructor({ map, builder, economia, enemigos, camera, canvas, baseEnemiga }) {
     this.map = map; this.builder = builder; this.economia = economia; this.enemigos = enemigos;
+    this.baseEnemiga = baseEnemiga;
     this.lista = [];
     this.container = new Container();
     this.suelo = new Graphics();                         // polvo y humo (por debajo de los tanques)
@@ -335,7 +351,7 @@ export class Tanques {
     if (tipo) { this.economia.mineral += TIPOS[tipo].coste; sfx.play('cancelar'); }
   }
 
-  crear(cu, tipo) {                                      // el tanque nace dentro del garaje y sale por la puerta (ver salir)
+  crear(cu, tipo, owner = 'player') {                                      // el tanque nace dentro del garaje y sale por la puerta (ver salir)
     const x = (cu.x + cu.def.w / 2) * TILE, yIni = (cu.y + cu.def.h) * TILE - 24, yFin = (cu.y + cu.def.h + .5) * TILE, d = dibujarTanque(tipo);
     d.c.alpha = 0;
     this.container.addChildAt(d.c, 1);                   // entre el suelo y los disparos
@@ -345,6 +361,7 @@ export class Tanques {
       fase: 0, retro: 0, golpe: 0, sinGolpe: 99, recargando: false, tpolvo: 0, polvo: [],
       ruta: null, destino: null, objetivo: null, quieto: false, reruta: 0,
       saliendo: cu, yIni, yFin,
+      owner, // 'player' o 'enemigo'
     };
     cu.salida = m;                                       // mientras sale, la puerta se queda abierta
     this.lista.push(m);
@@ -469,7 +486,7 @@ export class Tanques {
     for (const cu of this.builder.edificios) if (cu.fab) {          // producción en los cuarteles
       cu.fab.t -= dt;
       if (cu.fab.t <= 0) {
-        this.crear(cu, cu.fab.tipo); sfx.play('mecha');
+        this.crear(cu, cu.fab.tipo, cu.owner || 'player'); sfx.play('mecha');
         const sig = cu.cola && cu.cola.length ? cu.cola.shift() : null;      // pasa al siguiente pedido de la cola
         cu.fab = sig ? { tipo: sig, t: TIPOS[sig].tiempo } : null;
       }
@@ -486,12 +503,72 @@ export class Tanques {
     for (const m of this.lista) {
       if (m.saliendo) { this.salir(m, dt); continue; }              // saliendo del cuartel: aún no patrulla ni dispara
       const T = TIPOS[m.tipo];
-      if (m.objetivo && (m.objetivo.vida <= 0 || !this.enemigos.lista.includes(m.objetivo))) { m.objetivo = null; this.llegar(m); }   // el enemigo elegido murió: se queda donde está
+
+      // IA para tanques enemigos: atacan la base del jugador
+      if (m.owner === 'enemigo') {
+        // No son seleccionables por el jugador
+        this.sel.delete(m);
+        
+        // Si no tiene órdenes, ir hacia la base del jugador (spawn)
+        if (!m.ruta && !m.objetivo && !m.quieto) {
+          const playerBaseX = this.map.spawn.x * TILE;
+          const playerBaseY = this.map.spawn.y * TILE;
+          const distToPlayerBase = Math.hypot(playerBaseX - m.x, playerBaseY - m.y);
+          
+          // Si está lejos, moverse hacia la base del jugador
+          if (distToPlayerBase > 300) {
+            this.irA(m, playerBaseX, playerBaseY);
+          } else {
+            // Cerca de la base del jugador: buscar edificios para atacar
+            let buildingTarget = null, md = Infinity;
+            for (const e of this.builder.edificios) {
+              if (e.owner === 'enemigo') continue; // no atacar edificios propios
+              const c = { x: (e.x + e.def.w / 2) * TILE, y: (e.y + e.def.h / 2) * TILE };
+              const d = Math.hypot(c.x - m.x, c.y - m.y);
+              if (d < md) { md = d; buildingTarget = e; }
+            }
+            if (buildingTarget && md <= T.rango) {
+              m.objetivo = { 
+                x: (buildingTarget.x + buildingTarget.def.w / 2) * TILE, 
+                y: (buildingTarget.y + buildingTarget.def.h / 2) * TILE, 
+                vida: buildingTarget.vida, 
+                esEdificio: true,
+                buildingRef: buildingTarget
+              };
+            } else if (buildingTarget) {
+              // Moverse hacia el edificio
+              this.irA(m, (buildingTarget.x + buildingTarget.def.w / 2) * TILE, (buildingTarget.y + buildingTarget.def.h / 2) * TILE);
+            }
+          }
+        }
+      }
+      // Validar objetivo: si es un enemigo que murió, o un edificio que fue destruido, o el núcleo destruido
+      if (m.objetivo) {
+        let objetivoValido = true;
+        if (m.objetivo.esNucleo) {
+          objetivoValido = this.baseEnemiga && this.baseEnemiga.nucleo && this.baseEnemiga.nucleo.vida > 0;
+        } else if (m.objetivo.esEdificio) {
+          objetivoValido = m.objetivo.buildingRef && m.objetivo.buildingRef.vida > 0;
+        } else {
+          objetivoValido = m.objetivo.vida > 0 && this.enemigos.lista.includes(m.objetivo);
+        }
+        if (!objetivoValido) { m.objetivo = null; this.llegar(m); }
+      }
       let obj = null, md = Infinity;
       if (m.objetivo) { obj = m.objetivo; md = Math.hypot(obj.x - m.x, obj.y - m.y); }
-      else for (const en of this.enemigos.lista) {                  // enemigo más cercano: en marcha, solo dentro del alcance; si no, dentro de la zona de defensa
-        if (m.ruta ? Math.hypot(en.x - m.x, en.y - m.y) > T.rango : Math.hypot(en.x - m.home.x, en.y - m.home.y) > RADIO_DEFENSA) continue;
-        const d = Math.hypot(en.x - m.x, en.y - m.y); if (d < md) { md = d; obj = en; }
+      else {
+        for (const en of this.enemigos.lista) {                  // enemigo más cercano: en marcha, solo dentro del alcance; si no, dentro de la zona de defensa
+          if (m.ruta ? Math.hypot(en.x - m.x, en.y - m.y) > T.rango : Math.hypot(en.x - m.home.x, en.y - m.home.y) > RADIO_DEFENSA) continue;
+          const d = Math.hypot(en.x - m.x, en.y - m.y); if (d < md) { md = d; obj = en; }
+        }
+        // También considerar el núcleo de la base enemiga como objetivo
+        if (this.baseEnemiga && this.baseEnemiga.nucleo && this.baseEnemiga.nucleo.vida > 0) {
+          const core = this.baseEnemiga.nucleo;
+          const d = Math.hypot(core.x * TILE - m.x, core.y * TILE - m.y);
+          if (m.ruta ? d <= T.rango : d <= RADIO_DEFENSA) {
+            if (d < md) { md = d; obj = { x: core.x * TILE, y: core.y * TILE, vida: core.vida, esNucleo: true }; }
+          }
+        }
       }
       if (m.ruta) {                                                 // orden de movimiento: avanza punto a punto por la ruta
         while (m.ruta.length && Math.hypot(m.ruta[0].x - m.x, m.ruta[0].y - m.y) < (m.ruta.length > 1 ? 28 : 20)) m.ruta.shift();
@@ -528,7 +605,17 @@ export class Tanques {
       m.cd = Math.max(0, m.cd - dt);
       const alineado = Math.abs(Math.atan2(Math.sin(objTorre - m.torre), Math.cos(objTorre - m.torre))) < .12;
       if (obj && md <= T.rango && alineado && m.cd <= 0) {
-        obj.vida -= T.dano; m.cd = T.cd; m.retro = 1; m.tiro = { x: obj.x, y: obj.y, t: T.tiro, max: T.tiro }; sfx.play(T.sonido);
+        if (obj.esNucleo && this.baseEnemiga && this.baseEnemiga.nucleo) {
+          this.baseEnemiga.recibirDanoNucleo(T.dano);
+        } else if (obj.esEdificio && obj.buildingRef) {
+          obj.buildingRef.vida -= T.dano;
+          if (obj.buildingRef.vida <= 0) {
+            this.builder.quitar(obj.buildingRef);
+          }
+        } else {
+          obj.vida -= T.dano;
+        }
+        m.cd = T.cd; m.retro = 1; m.tiro = { x: obj.x, y: obj.y, t: T.tiro, max: T.tiro }; sfx.play(T.sonido);
         if (m.tipo === 'pesada') m.polvo.push({ x: m.x + Math.cos(m.torre) * T.largo, y: m.y + Math.sin(m.torre) * T.largo, t: .6, max: .6, r: 8, c: 0x8a8f99 });   // humo de la boca
       }
 
